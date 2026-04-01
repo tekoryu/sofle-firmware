@@ -2,13 +2,13 @@
  * Custom OLED status screen for Sofle keyboard (ZMK v0.3, LVGL 8)
  *
  * Central (left half) — 128x32 layout:
- *   y= 0  [Layer Name         ] [Output]
- *   y=10  [===Battery Bar====] [BAT%]
- *   y=22  [WPM NNN           ]
+ *   y= 0  [Layer Name             ] [BT/USB]
+ *   y=10  BAT [=========         ]  75%
+ *   y=22  WPM  047
  *
  * Peripheral (right half) — 128x32 layout:
  *   y= 0  SOFLE
- *   y=10  [===Battery Bar====] [BAT%]
+ *   y=12  BAT [=========         ]  75%
  */
 
 #include <zephyr/kernel.h>
@@ -38,19 +38,28 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #endif /* CONFIG_ZMK_SPLIT_ROLE_CENTRAL */
 
 /* ================================================================
- * SHARED: Battery status (both halves show their own battery level)
+ * SHARED: Battery status (both halves show their own level)
  * ================================================================ */
 
 static lv_obj_t *battery_label;
-static lv_obj_t *battery_bar;
+
+static void set_battery_text(lv_obj_t *label, uint8_t level) {
+    char bar[11];
+    int filled = (level * 10 + 50) / 100; /* 0–10, rounded */
+    for (int i = 0; i < 10; i++) {
+        bar[i] = (i < filled) ? '=' : ' ';
+    }
+    bar[10] = '\0';
+    lv_label_set_text_fmt(label, "BAT[%s]%3d%%", bar, level);
+}
 
 struct battery_status_state {
     uint8_t level;
 };
 
 static void battery_update_cb(struct battery_status_state state) {
-    lv_label_set_text_fmt(battery_label, "%3d%%", state.level);
-    lv_bar_set_value(battery_bar, state.level, LV_ANIM_OFF);
+    if (!battery_label) return;
+    set_battery_text(battery_label, state.level);
 }
 
 static struct battery_status_state battery_get_state(const zmk_event_t *eh) {
@@ -77,6 +86,7 @@ struct layer_status_state {
 };
 
 static void layer_update_cb(struct layer_status_state state) {
+    if (!layer_label) return;
     if (state.name) {
         lv_label_set_text(layer_label, state.name);
     } else {
@@ -106,6 +116,7 @@ struct output_status_state {
 };
 
 static void output_update_cb(struct output_status_state state) {
+    if (!output_label) return;
     switch (state.endpoint.transport) {
     case ZMK_TRANSPORT_USB:
         lv_label_set_text(output_label, "USB");
@@ -149,6 +160,7 @@ struct wpm_status_state {
 };
 
 static void wpm_update_cb(struct wpm_status_state state) {
+    if (!wpm_label) return;
     lv_label_set_text_fmt(wpm_label, "WPM %3d", state.wpm);
 }
 
@@ -164,85 +176,50 @@ ZMK_SUBSCRIPTION(custom_wpm, zmk_wpm_state_changed);
 #endif /* CONFIG_ZMK_SPLIT_ROLE_CENTRAL */
 
 /* ================================================================
- * Helpers: create styled widgets for monochrome OLED
- * ================================================================ */
-
-static lv_obj_t *make_label(lv_obj_t *parent, int x, int y, int w, const char *text) {
-    lv_obj_t *label = lv_label_create(parent);
-    lv_obj_set_pos(label, x, y);
-    if (w > 0) {
-        lv_obj_set_width(label, w);
-        lv_label_set_long_mode(label, LV_LABEL_LONG_CLIP);
-    }
-    lv_obj_set_style_text_color(label, lv_color_white(), 0);
-    lv_obj_set_style_bg_opa(label, LV_OPA_TRANSP, 0);
-    lv_label_set_text(label, text);
-    return label;
-}
-
-static lv_obj_t *make_battery_bar(lv_obj_t *parent, int x, int y, int w, int h) {
-    lv_obj_t *bar = lv_bar_create(parent);
-    lv_obj_set_size(bar, w, h);
-    lv_obj_set_pos(bar, x, y);
-    lv_bar_set_range(bar, 0, 100);
-    lv_bar_set_value(bar, 0, LV_ANIM_OFF);
-
-    /* Outer container: black fill, white 1px border, no rounding */
-    lv_obj_set_style_bg_color(bar, lv_color_black(), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_border_color(bar, lv_color_white(), LV_PART_MAIN);
-    lv_obj_set_style_border_width(bar, 1, LV_PART_MAIN);
-    lv_obj_set_style_radius(bar, 0, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(bar, 1, LV_PART_MAIN);
-
-    /* Indicator: solid white fill, no rounding */
-    lv_obj_set_style_bg_color(bar, lv_color_white(), LV_PART_INDICATOR);
-    lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, LV_PART_INDICATOR);
-    lv_obj_set_style_radius(bar, 0, LV_PART_INDICATOR);
-
-    return bar;
-}
-
-/* ================================================================
  * Status screen entry point — called once by ZMK display init
  * ================================================================ */
 
 lv_obj_t *zmk_display_status_screen(void) {
     lv_obj_t *screen = lv_obj_create(NULL);
 
-    /* Clean black OLED background */
-    lv_obj_set_style_bg_color(screen, lv_color_black(), 0);
-    lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(screen, 0, 0);
-    lv_obj_set_style_pad_all(screen, 0, 0);
-
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
     /*
-     * Central layout:
-     *   x=  0, y= 0, w=80  Layer name
-     *   x= 82, y= 0, w=46  Output / BT status
-     *   x=  0, y=10, w=94  Battery bar (h=8)
-     *   x= 97, y=10, w=31  Battery percentage
-     *   x=  0, y=22, w=128 WPM counter
+     * Central layout (positions in pixels, 8px font assumed):
+     *   y= 0  layer name (left) | output status (right)
+     *   y=10  battery text bar
+     *   y=22  WPM counter
      */
-    layer_label   = make_label(screen,  0,  0, 80, "...");
-    output_label  = make_label(screen, 82,  0, 46, "...");
-    battery_bar   = make_battery_bar(screen, 0, 10, 94, 8);
-    battery_label = make_label(screen, 97, 10, 31, "---");
+    layer_label = lv_label_create(screen);
+    lv_obj_set_pos(layer_label, 0, 0);
+    lv_label_set_text(layer_label, "");
+
+    output_label = lv_label_create(screen);
+    lv_obj_set_pos(output_label, 96, 0);
+    lv_label_set_text(output_label, "");
+
+    battery_label = lv_label_create(screen);
+    lv_obj_set_pos(battery_label, 0, 10);
+    lv_label_set_text(battery_label, "BAT[          ]  --%");
+
 #if IS_ENABLED(CONFIG_ZMK_WPM)
-    wpm_label     = make_label(screen,  0, 22, 128, "WPM   0");
+    wpm_label = lv_label_create(screen);
+    lv_obj_set_pos(wpm_label, 0, 22);
+    lv_label_set_text(wpm_label, "WPM   0");
 #endif
 
 #else
     /*
      * Peripheral layout:
-     *   x=  0, y= 0, w=128  Title
-     *   x=  0, y=10, w=94   Battery bar (h=8)
-     *   x= 97, y=10, w=31   Battery percentage
+     *   y= 0  title
+     *   y=12  battery text bar
      */
-    make_label(screen, 0, 0, 128, "SOFLE");
-    battery_bar   = make_battery_bar(screen, 0, 10, 94, 8);
-    battery_label = make_label(screen, 97, 10, 31, "---");
+    lv_obj_t *title = lv_label_create(screen);
+    lv_obj_set_pos(title, 0, 0);
+    lv_label_set_text(title, "SOFLE");
+
+    battery_label = lv_label_create(screen);
+    lv_obj_set_pos(battery_label, 0, 12);
+    lv_label_set_text(battery_label, "BAT[          ]  --%");
 #endif
 
     return screen;
